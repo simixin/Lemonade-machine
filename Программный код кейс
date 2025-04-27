@@ -1,0 +1,280 @@
+#include <EasyNextionLibrary.h>
+#include <FlexyStepper.h>   
+#include <Servo.h>   
+#define servo_pin 1   
+#define speed 700  //how many steps per second steppers do 
+#define deg1 0   
+#define deg2 60   
+#define deg3 120   
+#define deg4 180   
+#define servangle 70 // at what angle should we set the 1st glass for it to face the pouring unit 
+#define pourangle 200 // at what angle should we set the 1st glass for it to face the serving unit 
+#define step1mul 1.3 //milliliters to steps multipliers 
+#define step2mul 0.9 
+#define step3mul 2.7 
+ 
+byte sensors[4] = {9, 10, 11, 12}; //list of pins to wich glasses are connected correspondingly  
+   
+uint16_t recipes[6][3] = {   
+{50, 0, 0},  // 1-water; 2-syrup; 3-juice  
+{0, 10, 0},    
+{0, 0, 40},    
+{80, 20, 0}, 
+{30, 0, 50}, 
+{35, 10, 45}};   
+  
+//end of the calibration  
+  
+struct glass{   
+  bool state = false; //shows presence of the glass 
+  uint16_t degree = 0; //shows at what angle in space the glass is relatively to the 1st glass 
+};   
+   
+glass glass1;   
+glass glass2;   
+glass glass3;   
+glass glass4;   
+   
+glass glasses[4] = {glass1, glass2, glass3, glass4}; //list of glasses with corresponding properties    
+  
+FlexyStepper stepper1;   
+FlexyStepper stepper2;   
+FlexyStepper stepper3;   
+ 
+Servo servo; 
+
+EasyNex myNex(Serial);
+
+uint8_t queue[] = {0, 0, 0, 0}; //list of the requests to do 
+ 
+uint8_t orderLength = 0; //determines length of the order 
+ 
+uint8_t machinestate = 0; /* 4 states available: 
+0 - awaiting for the order 
+1 - pouring the drinks 
+2 - serving the drinks  
+*/ 
+ 
+bool processtate = false; /* 2 states available: 
+false - moving 
+true - pouring/serving/retrieving 
+*/ 
+ 
+byte currentGlass = 0; // glass we're currently working with 
+ 
+bool pouringfinished = false; // flag to check if the pouring process is over 
+
+//beggining of the function segment   
+//glasses segment 
+ 
+void glassinit(){   
+  glass1.degree = deg1;  // 
+  glass2.degree = deg2;  // 
+  glass3.degree = deg3;  // 
+  glass4.degree = deg4;  //setting corresponding degrees to the glasses 
+  for (byte i = 0; i != 4; ++i){   
+    pinMode(sensors[i], INPUT);  //booting up the sensors  
+  }   
+}   
+   
+void glassUpdate(){ 
+  glasses[currentGlass].state = !digitalRead(sensors[currentGlass]);    
+}  
+ 
+void serveGlass(){ 
+  if (!glasses[currentGlass].state){ // if the current glass is not detected  
+    delay(2000); //leave time for user to take their drink out of the machine 
+    if (currentGlass == orderLength - 1){ 
+      setNextScreen(); 
+      currentgalss = 0;
+      machinestate = 0; // if that was the last full glass go to the next stage 
+      orderLength = 0;
+      moveGlass();
+    } 
+    else (processtate = false); // else switch to moving 
+  } 
+} 
+ 
+void retrieveGlass(){ 
+  if (glasses[currentGlass].state){ //if the current spot is full 
+    delay(5000); // leave the time for the user 
+    processtate = false; // switch to moving(defaults)  
+    if (currentGlass == 0){ // if this was the last glass 
+      setNextScreen(); 
+      machinestate = 0; // send machine to the waiting mode 
+      orderLength = 0; // reset the orderLength 
+      trueWrite(glasses[0].degree + pourangle); //send glasses to the pouring position 
+    } 
+    else (--currentGlass); 
+  } 
+} 
+ 
+ //end of the glasses  
+ //stepper segment 
+ 
+void stepinit(){   
+  stepper1.connectToPins(5, 2);   
+  stepper2.connectToPins(6, 3);   
+  stepper3.connectToPins(7, 4);   
+  stepper1.setSpeedInStepsPerSecond(speed);   
+  stepper2.setSpeedInStepsPerSecond(speed);   
+  stepper3.setSpeedInStepsPerSecond(speed);   
+} 
+ 
+void requestPouring(){ 
+  uint8_t bever = 0; // beverage number to complete (1 - 6) 
+  for (byte i = 0; i != 4; ++i){ 
+    if (queue[i] != 0){ 
+      bever = queue[i]; // takin' the first beverage request from the queue 
+      queue[i] = 0; //erasing it to take the conseqent one next time 
+      ++orderLength; //adding one request to the orderLength  
+    } 
+  } 
+  if (bever == 0){  //if there are no requests left in the queue, switch to the next stage 
+    setNextScreen(); 
+    machinestate = 2; 
+    currentGlass = 0; 
+  } 
+  else{ //if there is a request, set up the steppers to fulfill it 
+    stepper1.setTargetPositionInSteps(millilitersTOsteps(bever, 1)); 
+    stepper2.setTargetPositionInSteps(millilitersTOsteps(bever, 2)); 
+    stepper3.setTargetPositionInSteps(millilitersTOsteps(bever, 3)); 
+  } 
+} 
+ 
+void pour(){ 
+  if (glasses[currentGlass].state && !stepper1.motionComplete())(stepper1.processMovement()); // if there's work to be done with that stepper, do it 
+  else if (glasses[currentGlass].state && !stepper2.motionComplete())(stepper2.processMovement()); //if there's no work, switch to the next stepper 
+  else if (glasses[currentGlass].state && !stepper3.motionComplete())(stepper3.processMovement()); 
+  else if (glasses[currentGlass].state){ // if there's no work left to do we switch variables 
+    ++currentGlass; // change the glass to the empty one 
+    requestPouring(); // request new drink or switch to the next stage if the queue is empty  
+    processtate = false;  // switch to the moving phase 
+  } 
+} 
+ 
+uint16_t millilitersTOsteps(uint8_t bev, uint8_t stepr){ 
+  switch (stepr){ 
+    case(1): 
+    return uint16_t(float(recipes[bev - 1][0]) * step1mul); 
+    case(2): 
+    return uint16_t(float(recipes[bev - 1][1]) * step2mul); 
+    case(3): 
+    return uint16_t(float(recipes[bev - 1][2]) * step3mul); 
+  } 
+} 
+ 
+//end of the steppers  
+// beginning of the servos  
+ 
+void trueWrite(uint16_t deg){ 
+  servo.write(map(deg, 0, 270, 0, 180));//transfer the real-angle units to the servo-applicable ones 
+} 
+ 
+void moveGlass(){ 
+  switch (machinestate){ 
+    case (1): // pouring case 
+    trueWrite(glasses[currentGlass].degree + pourangle); 
+    delay(1000); 
+    break;
+    case (2): // serving case 
+    trueWrite(glasses[currentGlass].degree + servangle); 
+    delay(300);
+    break; 
+    case (3): // recollecting case 
+    trueWrite(glasses[currentGlass].degree + servangle); 
+    delay(300); 
+  } 
+  processtate = true; // switch to the next stage of the execution 
+}  
+ 
+//end of thr servos  
+//beginning of the Nextion 
+ 
+void setNextScreen(){ //set the Nextion to the next screen 
+  if (machinestate == 1){
+  myNex.writeStr("page exe2");
+  }
+  else if (machinestate == 2){
+  myNex.writeStr("page exe3");
+  }
+  else if (machinestate == 3){
+  myNex.writeStr("page main");
+  }
+} 
+ 
+void trigger0(){
+  queue[orderLength] = 1;
+  ++orderLength;
+}
+void trigger1(){
+  queue[orderLength] = 2;
+  ++orderLength;
+}
+void trigger2(){
+  queue[orderLength] = 3;
+  ++orderLength;
+}
+void trigger3(){
+  queue[orderLength] = 4;
+  ++orderLength;
+}
+void trigger4(){
+  queue[orderLength] = 5;
+  ++orderLength;
+}
+void trigger5(){
+  queue[orderLength] = 6;
+  ++orderLength;
+}
+void trigger6(){
+  for (uint8_t i = 0; i != 4; ++i){
+    queue[i] = 0;
+  }
+  orderLength = 0; 
+}
+void trigger7(){
+  machinestate = 1;
+}
+
+//end of the function segment 
+ 
+ 
+void setup() {   
+  glassinit();   
+  stepinit();  
+  myNex.begin(9600);  
+  servo.attach(servo_pin); 
+  pinMode(LED_BUILTIN, OUTPUT); 
+}  
+  
+void loop() { 
+  glassUpdate(); 
+  switch (machinestate){ 
+  case(0): 
+  myNex.NextionListen();
+  break; 
+  case(1):
+  setNextScreen(); 
+  if(queue[0] == 3)(digitalWrite(LED_BUILTIN, HIGH)); 
+    switch (processtate){ 
+    case (false): 
+      moveGlass(); 
+      break; 
+    case (true): 
+      pour(); 
+      break; 
+    } 
+   break; 
+  case(2): 
+    switch (processtate){ 
+    case (false): 
+      moveGlass(); 
+      break; 
+    case (true): 
+      serveGlass(); 
+      break; 
+    }  
+    break; 
+  } 
+}
